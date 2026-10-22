@@ -1,0 +1,135 @@
+# ==============================================================================
+# Universal .gitignore for Multi-Stack Base Project
+# ==============================================================================
+
+# ─── Environment & Secrets (CRITICAL) ────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+secrets/
+credentials.json
+token.json
+
+# ─── Operating System & Editor Local Files ───────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# IDEs
+.idea/
+*.swp
+*.swo
+*~
+.fleet/
+.history/
+*.sublime-project
+*.sublime-workspace
+
+# ─── Logs, Diagnostics & Temp ────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.tmp
+*.temp
+
+# ─── Testing & Coverage ──────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+htmlcov/
+.coverage
+.coverage.*
+*.lcov
+.pytest_cache/
+.tox/
+
+# ─── Node.js / JavaScript / TypeScript ───────────────────────────────────────
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.astro/
+.output/
+.turbo/
+.cache/
+.parcel-cache/
+.docusaurus/
+tsconfig.tsbuildinfo
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Go ──────────────────────────────────────────────────────────────────────
+/bin/
+*.exe
+*.test
+*.prof
+
+# ─── Rust ────────────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+
+# ─── Java / Kotlin / Gradle / Maven ──────────────────────────────────────────
+.gradle/
+build/
+!src/**/build/
+target/
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+
+# ─── C / C++ / CMake ─────────────────────────────────────────────────────────
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CMakeScripts/
+compile_commands.json
+
+# ─── Databases & Local Storage ───────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+*.local
+
+# ─── Downloaded files & Temporary Segments ──────────────────────────────
+downloaded_files/
+_temp_segments/
+*.mp4
+*,mp4
+*.m4s
+*.ts
+*.raw

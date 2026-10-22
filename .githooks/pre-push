@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Pre-Push Hook: Branch Protection & Standardizing on 'main'
+# ==============================================================================
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+# Read standard input: <local ref> <local sha> <remote ref> <remote sha>
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    REMOTE_BRANCH="${REMOTE_REF#refs/heads/}"
+    LOCAL_BRANCH="${LOCAL_REF#refs/heads/}"
+
+    # Skip deletion pushes
+    if [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ]; then
+        continue
+    fi
+
+    # 1. Strictly forbid legacy 'master' branch
+    if [ "$REMOTE_BRANCH" = "master" ] || [ "$LOCAL_BRANCH" = "master" ]; then
+        echo ""
+        echo -e "${RED}❌ ERROR: Branch 'master' is retired.${NC}"
+        echo -e "${YELLOW}This repository standardizes strictly on 'main'.${NC}"
+        echo -e "Rename your local branch to main:"
+        echo -e "  git branch -m master main"
+        echo ""
+        exit 1
+    fi
+
+    # 2. Forbid direct push to 'main' (Force PR workflow)
+    if [ "$REMOTE_BRANCH" = "main" ]; then
+        echo ""
+        echo -e "${RED}❌ ERROR: Direct push to 'main' is forbidden!${NC}"
+        echo -e "All updates to 'main' must be reviewed and merged via Pull Request."
+        echo ""
+        echo -e "${YELLOW}How to proceed:${NC}"
+        echo -e "  1. Create a feature branch:   git checkout -b feat/your-feature-name"
+        echo -e "  2. Push your branch:          git push -u origin feat/your-feature-name"
+        echo -e "  3. Open a Pull Request into 'main'"
+        echo ""
+        exit 1
+    fi
+
+    # 3. Enforce branch naming conventions
+    # Skip tags
+    if [[ "$LOCAL_REF" =~ ^refs\/tags\/ ]]; then
+        continue
+    fi
+
+    BRANCH_REGEX="^(feat|fix|refactor|test|docs|chore|ci|perf)\/[a-zA-Z0-9_.-]+$"
+    if ! [[ "$LOCAL_BRANCH" =~ $BRANCH_REGEX ]]; then
+        echo ""
+        echo -e "${RED}❌ Invalid branch name: '${LOCAL_BRANCH}'${NC}"
+        echo -e "Branch names must follow: ${GREEN}<type>/<short-description>${NC}"
+        echo -e "Allowed types: ${YELLOW}feat/, fix/, refactor/, test/, docs/, chore/, ci/, perf/${NC}"
+        echo -e "Examples:"
+        echo -e "  feat/user-authentication"
+        echo -e "  fix/connection-timeout"
+        echo -e "  chore/update-dependencies"
+        echo ""
+        exit 1
+    fi
+done
+
+exit 0
