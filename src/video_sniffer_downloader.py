@@ -2,12 +2,13 @@
 """
 Video Sniffer & Segment Downloader
 ----------------------------------
-1. Navigates to a webpage using a headless browser (Brave / Chrome).
+1. Navigates to a webpage using an optimized headless browser (Brave / Chrome).
 2. Intercepts network packets via Chrome DevTools Protocol (CDP).
 3. Automatically triggers playback on HTML5 video players.
 4. Identifies streaming manifests (.m3u8, .mpd) or media segments (.ts, .m4s).
-5. Gathers all segments (supporting both MPEG-TS and fragmented fMP4/CMAF with EXT-X-MAP init segments),
-   downloads them, and stitches them into a final .mp4 video.
+5. Closes the browser IMMEDIATELY after sniffing to release CPU & RAM.
+6. Downloads segments (supporting both MPEG-TS and fMP4/CMAF with EXT-X-MAP init segments)
+   and stitches them into a final .mp4 video using FFmpeg.
 """
 
 import os
@@ -15,16 +16,121 @@ import sys
 import time
 import json
 import re
+import signal
+import atexit
 import argparse
 import subprocess
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+import psutil
+
+# Global reference for signal handling and cleanup
+_ACTIVE_DRIVER = None
+_ACTIVE_BROWSER_PIDS = set()
+
+
+def _register_browser_pids(driver):
+    """Discovers and tracks all browser and renderer PIDs for clean termination."""
+    global _ACTIVE_BROWSER_PIDS
+    _ACTIVE_BROWSER_PIDS.clear()
+
+    # Track chromedriver service process
+    service_proc = getattr(getattr(driver, "service", None), "process", None)
+    if service_proc and service_proc.pid:
+        _ACTIVE_BROWSER_PIDS.add(service_proc.pid)
+
+    # Track browser processes by remote debugging port
+    dbg = driver.capabilities.get("goog:chromeOptions", {}).get("debuggerAddress", "")
+    port = dbg.split(":")[1] if ":" in dbg else None
+    if port:
+        for p in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = " ".join(p.info["cmdline"] or [])
+                if f"--remote-debugging-port={port}" in cmdline:
+                    _ACTIVE_BROWSER_PIDS.add(p.info["pid"])
+                    # Include child processes (renderers, gpu, crashpad)
+                    for child in p.children(recursive=True):
+                        _ACTIVE_BROWSER_PIDS.add(child.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+
+def close_driver(driver=None):
+    """
+    Stops page execution and forcefully terminates the headless browser
+    and all associated processes to prevent CPU throttling and fan noise.
+    """
+    global _ACTIVE_DRIVER, _ACTIVE_BROWSER_PIDS
+    target_driver = driver or _ACTIVE_DRIVER
+    if not target_driver:
+        return
+
+    # 1. Stop all video playback and unload page scripts immediately
+    try:
+        target_driver.execute_script("""
+            window.stop();
+            document.querySelectorAll('video, audio').forEach(el => {
+                try { el.pause(); el.src = ''; el.load(); } catch(e) {}
+            });
+        """)
+        target_driver.get("about:blank")
+    except Exception:
+        pass
+
+    # 2. Standard quit
+    try:
+        target_driver.quit()
+    except Exception:
+        pass
+
+    # 3. Ensure all tracked child/browser processes are dead
+    for pid in list(_ACTIVE_BROWSER_PIDS):
+        try:
+            p = psutil.Process(pid)
+            if p.is_running():
+                p.terminate()
+                p.wait(timeout=1)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+            try:
+                if psutil.pid_exists(pid):
+                    os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+    _ACTIVE_BROWSER_PIDS.clear()
+    _ACTIVE_DRIVER = None
+
+
+def _signal_handler(sig, frame):
+    """Ensures clean shutdown when user interrupts (Ctrl+C)."""
+    print("\n[!] Process interrupted. Releasing resources...")
+    close_driver()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+atexit.register(close_driver)
+
 
 def get_driver():
-    """Initializes the headless browser with CDP network logging enabled."""
+    """Initializes an optimized headless browser with low CPU/RAM footprint."""
+    global _ACTIVE_DRIVER
     from seleniumbase import Driver
-    print("[1/5] Initializing headless browser with CDP network interception...")
+    print("[1/5] Initializing lightweight headless browser with CDP network interception...")
+
+    # Flags to suppress rendering, audio, and background tasks to reduce CPU usage
+    chromium_flags = (
+        "--mute-audio,"
+        "--disable-gpu,"
+        "--disable-software-rasterizer,"
+        "--disable-dev-shm-usage,"
+        "--disable-background-networking,"
+        "--disable-background-timer-throttling,"
+        "--disable-renderer-backgrounding"
+    )
+
     try:
         # Use Brave browser as configured in ~/projects/headless_telebot
         driver = Driver(
@@ -32,7 +138,10 @@ def get_driver():
             uc=True,
             headless=True,
             log_cdp_events=True,
-            page_load_strategy="eager"
+            page_load_strategy="eager",
+            block_images=True,
+            disable_gpu=True,
+            chromium_arg=chromium_flags
         )
     except Exception as e:
         print(f"      Brave unavailable ({e}), falling back to Chrome...")
@@ -40,9 +149,15 @@ def get_driver():
             uc=True,
             headless=True,
             log_cdp_events=True,
-            page_load_strategy="eager"
+            page_load_strategy="eager",
+            block_images=True,
+            disable_gpu=True,
+            chromium_arg=chromium_flags
         )
+
     driver.set_page_load_timeout(30)
+    _ACTIVE_DRIVER = driver
+    _register_browser_pids(driver)
     return driver
 
 
@@ -63,9 +178,12 @@ def trigger_video_playback(driver):
     });
     return played;
     """
-    played = driver.execute_script(js_play_script)
-    if played:
-        print("      Triggered playback on <video> element via JavaScript.")
+    try:
+        played = driver.execute_script(js_play_script)
+        if played:
+            print("      Triggered playback on <video> element via JavaScript.")
+    except Exception:
+        pass
 
     # 2. Check for common play buttons or overlays
     play_selectors = [
@@ -137,7 +255,7 @@ def sniff_network_stream(driver, max_wait_sec=15):
             except Exception:
                 continue
 
-        # If we have captured a playlist or sufficient segments, we can proceed
+        # If we have captured a playlist or sufficient segments, we can proceed immediately
         if manifest_urls or len(segment_urls) >= 3:
             break
             
@@ -167,7 +285,6 @@ def parse_m3u8_segments(m3u8_url, headers):
     # Check if this is a master playlist pointing to child playlists
     sub_playlists = [line for line in lines if not line.startswith("#") and (".m3u8" in line or "http" in line)]
     if any(line.startswith("#EXT-X-STREAM-INF") for line in lines) and sub_playlists:
-        # Pick the highest quality / last playlist
         target_sub = urljoin(m3u8_url, sub_playlists[-1])
         print(f"      Master playlist detected. Selected stream: {target_sub}")
         return parse_m3u8_segments(target_sub, headers)
@@ -276,10 +393,11 @@ def merge_segments_to_mp4(init_file, segment_files, output_mp4):
             with open(seg, "rb") as f:
                 outfile.write(f.read())
 
-    # Remux through ffmpeg to index metadata, timestamps, and set faststart
+    # Remux through ffmpeg with limited threads to save CPU
     cmd = [
         "ffmpeg",
         "-y",
+        "-threads", "2",
         "-i", combined_raw,
         "-c", "copy",
         "-movflags", "+faststart",
@@ -292,8 +410,7 @@ def merge_segments_to_mp4(init_file, segment_files, output_mp4):
         print(f"      [Success] Video created: {output_mp4} ({size_mb:.2f} MB)")
         return True
     else:
-        print(f"      [FFmpeg Remux Warning] Direct stream remux needed: {result.stderr[-300:]}")
-        # Fallback: if copy fails due to bitstream, keep combined raw if it's already mp4
+        # Fallback: keep combined raw if already playable
         if os.path.exists(combined_raw) and os.path.getsize(combined_raw) > 1024:
             import shutil
             shutil.copyfile(combined_raw, output_mp4)
@@ -307,6 +424,7 @@ def ffmpeg_direct_stream_download(m3u8_url, headers, output_mp4):
     """
     High-performance native HLS stream downloader:
     Passes manifest URL and intercepted headers directly to FFmpeg with real-time progress.
+    Limits CPU thread saturation using -threads 2.
     """
     print(f"[4/5] Downloading and remuxing stream via FFmpeg: {output_mp4}")
     ua = headers.get("User-Agent", headers.get("user-agent", "Mozilla/5.0 (X11; Linux x86_64)"))
@@ -317,6 +435,7 @@ def ffmpeg_direct_stream_download(m3u8_url, headers, output_mp4):
         "ffmpeg",
         "-y",
         "-hide_banner",
+        "-threads", "2",        # Limit threads to keep CPU cool
         "-headers", header_str,
         "-i", m3u8_url,
         "-c", "copy",
@@ -328,7 +447,6 @@ def ffmpeg_direct_stream_download(m3u8_url, headers, output_mp4):
     last_print = 0
     for line in proc.stderr:
         if "time=" in line and (time.time() - last_print > 1):
-            # Extract time & speed
             time_match = re.search(r'time=([\d:.]+)', line)
             speed_match = re.search(r'speed=([\d.x]+)', line)
             time_str = time_match.group(1) if time_match else ""
@@ -353,7 +471,7 @@ def main():
     parser.add_argument("url", help="Webpage URL containing the video")
     parser.add_argument("-o", "--output", default="downloaded_video.mp4", help="Output file path (default: downloaded_video.mp4)")
     parser.add_argument("--wait", type=int, default=15, help="Seconds to sniff for video packets (default: 15)")
-    parser.add_argument("--threads", type=int, default=8, help="Concurrent segment download threads (default: 8)")
+    parser.add_argument("--threads", type=int, default=6, help="Concurrent segment download threads (default: 6)")
     parser.add_argument("--method", choices=["auto", "segments", "ffmpeg-direct"], default="auto",
                         help="'auto' chooses the fastest and most reliable method; 'segments' downloads chunks; 'ffmpeg-direct' passes stream to ffmpeg")
     args = parser.parse_args()
@@ -363,7 +481,7 @@ def main():
         driver = get_driver()
         print(f"      Navigating to: {args.url}")
         driver.get(args.url)
-        time.sleep(3)
+        time.sleep(2)
 
         # Trigger playback
         trigger_video_playback(driver)
@@ -373,7 +491,15 @@ def main():
 
         if not manifests and not segments:
             print("[!] Could not detect video stream packets. The page may require login, interaction, or DRM.")
+            close_driver(driver)
             sys.exit(1)
+
+        # CRITICAL OPTIMIZATION:
+        # Immediately terminate the browser and reap all renderer/GPU processes!
+        # The browser is no longer needed. Releasing it now prevents CPU heating and fan noise during download.
+        print("[*] Stream captured! Terminating headless browser to free CPU & RAM...")
+        close_driver(driver)
+        driver = None
 
         # Output folder for temporary chunks
         chunks_dir = os.path.join(os.path.dirname(os.path.abspath(args.output)), "_temp_segments")
@@ -408,10 +534,7 @@ def main():
 
     finally:
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            close_driver(driver)
 
 
 if __name__ == "__main__":

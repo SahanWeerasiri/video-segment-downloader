@@ -133,3 +133,4 @@ All significant architectural choices are documented in [`docs/adr/`](docs/adr/R
 | [0003](docs/adr/0003-fmp4-initialization-and-hybrid-assembly.md) | Fragmented MP4 (fMP4/CMAF) Initialization & Hybrid Assembly | accepted | 2026-10-21 |
 | [0004](docs/adr/0004-zero-secret-configuration-no-env.md) | Zero Secret Configuration (No .env Dependency) | accepted | 2026-10-22 |
 | [0005](docs/adr/0005-modular-directory-structure.md) | Modular Directory Structure (src, scripts, docs) | accepted | 2026-10-22 |
+| [0006](docs/adr/0006-lifecycle-cleanup-and-resource-optimization.md) | Lifecycle Process Cleanup & CPU Resource Optimization | accepted | 2026-10-22 |
